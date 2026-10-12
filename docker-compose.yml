@@ -1,0 +1,110 @@
+# Local assessment stack. MySQL 8 for Fineract, the mock ERP, and the integration service.
+# Fineract itself is added once the 1.15.0 image is built from the pinned tag plus our patch.
+
+services:
+  db:
+    image: mysql:8.4
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: fineract
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pfineract"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  mock-erp:
+    build: ./mock-erp
+    environment:
+      DATABASE_URL: mysql+pymysql://erp:erp@db:3306/mock_erp
+      API_TOKEN: assessment-token
+      FAULTS_ENABLED: "true"
+    ports:
+      - "8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  fineract:
+    image: fineract:1.15.0
+    user: "1000:1000"
+    volumes:
+      - ./docker/fineract/plugins:/app/plugins:ro
+    environment:
+      FINERACT_HIKARI_DRIVER_SOURCE_CLASS_NAME: com.mysql.cj.jdbc.Driver
+      FINERACT_HIKARI_JDBC_URL: jdbc:mysql://db:3306/fineract_tenants
+      FINERACT_HIKARI_USERNAME: root
+      FINERACT_HIKARI_PASSWORD: fineract
+      FINERACT_DEFAULT_TENANTDB_HOSTNAME: db
+      FINERACT_DEFAULT_TENANTDB_PORT: "3306"
+      FINERACT_DEFAULT_TENANTDB_UID: root
+      FINERACT_DEFAULT_TENANTDB_PWD: fineract
+      FINERACT_DEFAULT_TENANTDB_NAME: fineract_default
+      FINERACT_DEFAULT_TENANTDB_IDENTIFIER: default
+      FINERACT_DEFAULT_TENANTDB_TIMEZONE: Africa/Kigali
+      FINERACT_SERVER_SSL_ENABLED: "true"
+      SPRING_PROFILES_ACTIVE: test,diagnostics
+      JAVA_TOOL_OPTIONS: "-Xmx1G -XX:+UseContainerSupport --add-exports=java.naming/com.sun.jndi.ldap=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.security=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.management/javax.management=ALL-UNNAMED --add-opens=java.naming/javax.naming=ALL-UNNAMED"
+    ports:
+      - "8443:8443"
+    tmpfs:
+      - /tmp:rw,nosuid,size=256m
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z localhost 8443"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 180s
+
+  integration-service:
+    build: ./integration-service
+    environment:
+      DATABASE_URL: mysql+pymysql://integration:integration@db:3306/integration
+      API_TOKEN: assessment-token
+      ERP_BASE_URL: http://mock-erp:8000
+      ERP_API_TOKEN: assessment-token
+      FINERACT_BASE_URL: https://fineract:8443/fineract-provider/api/v1
+      FINERACT_USERNAME: mifos
+      FINERACT_PASSWORD: password
+      FINERACT_TENANT: default
+      FAULTS_ENABLED: "true"
+    ports:
+      - "8090:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      mock-erp:
+        condition: service_started
+      fineract:
+        condition: service_started
+
+  # Apache Fineract backoffice UI. Built from a pinned commit; not the repo's own Postgres compose.
+  # The browser talks only to this origin. Nginx proxies /api/ to the existing fineract service.
+  fineract-backoffice-ui:
+    build:
+      context: https://github.com/apache/fineract-backoffice-ui.git#2674193aa04359159db6b52472c1f74b0e4c46fa
+      dockerfile: deploy/Dockerfile
+    image: fineract-backoffice-ui:2674193
+    environment:
+      FINERACT_API_URL: https://fineract:8443/fineract-provider/api
+      FINERACT_PROXY_SSL_VERIFY: "off"
+      DEFAULT_TENANT: default
+      RBAC_ENABLED: "true"
+      DEVELOPER_TOOLS_ENABLED: "false"
+    ports:
+      - "8080:80"
+    depends_on:
+      fineract:
+        condition: service_started
+
+volumes:
+  mysql-data:

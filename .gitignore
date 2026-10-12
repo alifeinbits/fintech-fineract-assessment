@@ -1,0 +1,15 @@
+upstream/fineract/
+.venv/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.pyc
+.env
+*.log
+*.db
+build/
+evidence/*.db
+.idea/
+.vscode/
