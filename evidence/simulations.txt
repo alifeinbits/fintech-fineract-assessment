@@ -1,0 +1,162 @@
+## I1 sequential duplicate disbursement
+1. Initial state: Approved loan, no disbursement, no journal.
+2. Request: POST /api/loans/FIN-2026-000001/disburse four times with external_reference FIN-2026-000001-DISB.
+3. Response: HTTP [201, 200, 200, 200].
+4. Fineract state: Fineract disbursement posts: 1. Status: Active.
+5. ERP state: ERP journals: ['FIN-2026-000001-DISB'].
+6. Integration state: Stored transaction status: COMPLETED.
+7. Expected result: 4 requests, 1 Fineract disbursement, 1 ERP journal, 1 integration transaction.
+8. Actual result: Requests 4, Fineract posts 1, journals 1, codes [201, 200, 200, 200].
+9. Explanation: The first call completes. The next three replay the stored response because the payload hash matches.
+
+## I2a ten parallel disbursements, one reference
+1. Initial state: Approved loan, no disbursement.
+2. Request: Ten simultaneous POSTs of DISB-SAME.
+3. Response: HTTP [201, 202, 202, 202, 202, 202, 202, 202, 202, 202].
+4. Fineract state: Fineract disbursement posts: 1.
+5. ERP state: One journal for DISB-SAME when the winner finished.
+6. Integration state: One disbursement slot on the loan.
+7. Expected result: Exactly one Fineract disbursement. The winner returns 201. The others return 202 while that call is still in progress, or 200 if it has already finished.
+8. Actual result: Posts 1, codes [201, 202, 202, 202, 202, 202, 202, 202, 202, 202].
+9. Explanation: The loan_disbursements unique key admits one reference. Callers that lose the race read the in-progress row (202) or the stored result (200) and do not post again.
+
+## I2b ten parallel disbursements, different references
+1. Initial state: Approved loan, no disbursement.
+2. Request: Ten simultaneous POSTs, references DISB-0 through DISB-9.
+3. Response: HTTP [201, 409, 409, 409, 409, 409, 409, 409, 409, 409].
+4. Fineract state: Fineract disbursement posts: 1.
+5. ERP state: One journal, for whichever reference won the slot.
+6. Integration state: One row in loan_disbursements.
+7. Expected result: Exactly one disbursement. One 201 and nine 409 responses.
+8. Actual result: Posts 1, codes [201, 409, 409, 409, 409, 409, 409, 409, 409, 409].
+9. Explanation: Idempotency keys do not collide across references. The unique loan_reference on loan_disbursements is the constraint that stops the second disbursement. Fineract loan state would reject another disburse if that row were bypassed.
+
+## I3 ten parallel repayments, different references
+1. Initial state: Active loan, outstanding 5000000.
+2. Request: Ten simultaneous repayments of 500000, references REP-0 through REP-9.
+3. Response: HTTP [201, 201, 201, 201, 201, 201, 201, 201, 201, 201].
+4. Fineract state: Fineract repayment posts: 10. Outstanding on the stand-in: 0. Status: Closed (obligations met).
+5. ERP state: Ten journals, one per reference.
+6. Integration state: Partner loan outstanding 0.000000, fineract_status Closed (obligations met).
+7. Expected result: Each reference applies once. Outstanding is 0 and the Fineract status is Closed (obligations met).
+8. Actual result: Posts 10, outstanding 0.000000, status Closed (obligations met), codes [201, 201, 201, 201, 201, 201, 201, 201, 201, 201].
+9. Explanation: Outstanding is read back from the stand-in after each post, not computed as sent amount minus nothing. A duplicate of one reference would replay and would not post a second journal.
+
+## J2 Fineract down
+1. Initial state: Approved loan. Idempotency row does not exist yet.
+2. Request: POST disbursement with X-Fault: fineract_down, then the same body with no fault.
+3. Response: First HTTP 503 {'error': {'code': 'fineract_down', 'message': 'Fineract is down', 'correlation_id': '824d1004-a7cc-4ff6-b580-5f315e72f117'}}. Second HTTP 201.
+4. Fineract state: Fineract disbursement posts: 1.
+5. ERP state: Journals: ['DISB-DOWN'].
+6. Integration state: After recovery-by-retry, transaction status COMPLETED.
+7. Expected result: Caller gets 503 and a FAILED row. The same payload is safe to retry and then posts once.
+8. Actual result: Posts 1, journals 1, second code 201.
+9. Explanation: Nothing was sent to Fineract on the failed attempt, so the retry is a new command, not a blind replay.
+
+## J3 Fineract timeout after send
+1. Initial state: Approved loan.
+2. Request: POST with X-Fault: fineract_timeout_after_send, then the same POST, then POST /api/admin/recover.
+3. Response: First HTTP 504. Second HTTP 202. Recovered {'recovered': [{'external_reference': 'DISB-FTIME', 'status': 'COMPLETED'}]}.
+4. Fineract state: Fineract disbursement posts: 1. The transaction is found by external id.
+5. ERP state: Journals: ['DISB-FTIME'].
+6. Integration state: Transaction status COMPLETED.
+7. Expected result: 504, then 202 because the row is still in progress, then recovery completes one journal.
+8. Actual result: Posts 1, journals 1, second code 202.
+9. Explanation: The command reached Fineract. Recovery looks up external id DISB-FTIME and does not disburse again.
+
+## J1 ERP down after Fineract success
+1. Initial state: Approved loan.
+2. Request: POST with X-Fault: erp_down, then the same body with no fault.
+3. Response: First HTTP 503 {'error': {'code': 'needs_reconciliation', 'message': 'Fineract succeeded and the ERP journal still needs posting', 'correlation_id': '5ebc0dad-8f9e-475b-97d1-5cb853ee0f32'}}. Second HTTP 201.
+4. Fineract state: Fineract disbursement posts: 1.
+5. ERP state: Journals: ['DISB-ERPDOWN'].
+6. Integration state: Transaction status COMPLETED.
+7. Expected result: 503 needs_reconciliation. The retry posts the journal once. Fineract is not called again.
+8. Actual result: Posts 1, journals 1.
+9. Explanation: Status stays NEEDS_RECONCILIATION, which is retryable. The ERP lookup by external reference prevents a second journal.
+
+## J4 ERP timeout after the journal was written
+1. Initial state: Approved loan.
+2. Request: POST with X-Fault: erp_timeout_after_write, then POST /api/admin/recover.
+3. Response: First HTTP 504. Recovered {'recovered': [{'external_reference': 'DISB-ETIME', 'status': 'COMPLETED'}]}.
+4. Fineract state: Fineract disbursement posts: 1.
+5. ERP state: Journals: ['DISB-ETIME'].
+6. Integration state: Transaction status COMPLETED.
+7. Expected result: 504 while the row stays ERP_PENDING. Recovery sees the existing journal and completes without writing another.
+8. Actual result: Posts 1, journals 1, status COMPLETED.
+9. Explanation: The journal is keyed by external reference, so the catch-up path finds it instead of posting again.
+
+## J5 crash between Fineract success and the ERP call
+1. Initial state: Approved loan.
+2. Request: POST with X-Fault: crash_before_erp. Then construct the app again on the same database.
+3. Response: First HTTP 500. After restart, transaction {'external_reference': 'DISB-CRASH', 'loan_reference': 'FIN-2026-000001', 'kind': 'DISBURSEMENT', 'amount': '5000000.000000', 'principal': '5000000.000000', 'interest': '0.000000', 'status': 'COMPLETED', 'loan_status': 'ACTIVE', 'fineract_status': 'Active', 'outstanding': '5000000.000000'}.
+4. Fineract state: Fineract disbursement posts: 1. Loan status Active.
+5. ERP state: Journals: ['DISB-CRASH'].
+6. Integration state: Transaction status COMPLETED.
+7. Expected result: 500 with the row left at FINERACT_DONE. Startup recovery posts the journal once.
+8. Actual result: Posts 1, journals 1, status COMPLETED.
+9. Explanation: create_app runs the startup sweep. It finds the Fineract transaction by external id and writes the journal.
+
+## K reconciliation, four outcomes
+1. Initial state: One matched disbursement, then three seeded discrepancies on the stand-ins.
+2. Request: POST /api/reconciliation with DISB-MATCH, DISB-MISSING-ERP, JRN-ORPHAN, DISB-BAD.
+3. Response: {'results': [{'loan_reference': 'FIN-2026-000001', 'external_reference': 'DISB-MATCH', 'outcome': 'MATCHED', 'fineract_amount': '5000000', 'erp_amount': '5000000'}, {'loan_reference': 'FIN-2026-000001', 'external_reference': 'DISB-MISSING-ERP', 'outcome': 'MISSING_IN_ERP', 'fineract_amount': '5000000', 'erp_amount': None}, {'loan_reference': 'FIN-2026-000001', 'external_reference': 'JRN-ORPHAN', 'outcome': 'MISSING_IN_FINERACT', 'fineract_amount': None, 'erp_amount': '5000000'}, {'loan_reference': 'FIN-2026-000001', 'external_reference': 'DISB-BAD', 'outcome': 'AMOUNT_MISMATCH', 'fineract_amount': '5000000', 'erp_amount': '1'}]}
+4. Fineract state: Stand-in has DISB-MATCH, DISB-MISSING-ERP, and DISB-BAD. It has no JRN-ORPHAN.
+5. ERP state: ERP has DISB-MATCH, JRN-ORPHAN, and DISB-BAD with debit 1. It has no DISB-MISSING-ERP.
+6. Integration state: The report does not write an integration row.
+7. Expected result: MATCHED, MISSING_IN_ERP, MISSING_IN_FINERACT, AMOUNT_MISMATCH. No journal is created or repaired.
+8. Actual result: Outcomes ['MATCHED', 'MISSING_IN_ERP', 'MISSING_IN_FINERACT', 'AMOUNT_MISMATCH']. Journal keys ['DISB-BAD', 'DISB-MATCH', 'JRN-ORPHAN']. Disburse posts 1.
+9. Explanation: Comparison is read-only. A reversal would be a new journal {original}:reversal with opposite lines; this report does not post one.
+
+## Log trail for FIN-2026-000001
+{"timestamp": "2026-10-07T20:36:17.638529+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "48d7572e-b488-4d05-86b6-06b795e47848", "external_reference": "LN-DUP", "client_uid": "CLT-DUP", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.685553+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "e32064b7-75a4-449f-bcd4-c333076c1340", "external_reference": "FIN-2026-000001-DISB", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "FIN-2026-000001-DISB"}
+{"timestamp": "2026-10-07T20:36:17.701173+00:00", "event": "disbursement", "status": "REPLAY", "correlation_id": "7243b554-4b6c-4e76-971e-a8b56dbb12ad", "external_reference": "FIN-2026-000001-DISB", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.710757+00:00", "event": "disbursement", "status": "REPLAY", "correlation_id": "afb3950d-e8c4-4ff8-bfa8-4d322a224490", "external_reference": "FIN-2026-000001-DISB", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.721876+00:00", "event": "disbursement", "status": "REPLAY", "correlation_id": "65620add-0808-4b44-a745-9591a406a910", "external_reference": "FIN-2026-000001-DISB", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.804530+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "b2c20f71-4c78-4975-82af-05fe44c0190e", "external_reference": "LN-SAME", "client_uid": "CLT-SAME", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.958359+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "e2e0d6a8-710b-4181-b3d4-02a62a44aae8", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.963050+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "f9b93fb1-b40b-4716-8c80-6e80379f4301", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.966328+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "bc19a4f5-5e33-4b81-93e9-5bb08e88e77e", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.967088+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "0d2590d7-ab5c-49e1-87b2-8e05f2af2e74", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.978831+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "a17a031f-8fc2-4248-82e1-4905b77d76fb", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.979953+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "6ae1a4f3-1916-4823-a28f-81ee94a3bd54", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.981890+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "a4396694-95bc-445e-81d2-955468eaca32", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.985328+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "c3357c45-e2b6-403e-8c9d-0d91ba681c55", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:17.987301+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "a7715bb4-07b1-408e-a0fe-e0ac05b145b6", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:18.054003+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "17f6115e-4f1a-4243-b2cb-80e982e179a0", "external_reference": "DISB-SAME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-SAME"}
+{"timestamp": "2026-10-07T20:36:18.143189+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "a3e4e2c5-4b6d-465e-89b2-43035be70393", "external_reference": "LN-DIFF", "client_uid": "CLT-DIFF", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:18.484973+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "926b2ab9-7e5f-416e-9356-fc3c4e0f59a6", "external_reference": "DISB-7", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-7"}
+{"timestamp": "2026-10-07T20:36:18.599441+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "90145702-1d4b-4c5a-a33d-80605cb8efd7", "external_reference": "LN-REPAY", "client_uid": "CLT-REPAY", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:18.637348+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "5f38b1bc-0aba-48c1-9056-ee8ed2d89753", "external_reference": "DISB-REPAY", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-REPAY"}
+{"timestamp": "2026-10-07T20:36:18.978198+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "459edb53-d161-4c09-8c2e-826cb007595f", "external_reference": "REP-6", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-6"}
+{"timestamp": "2026-10-07T20:36:19.016573+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "646b25e1-4cda-443b-aaf6-af874e0c8a40", "external_reference": "REP-1", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-1"}
+{"timestamp": "2026-10-07T20:36:19.024318+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "7c0817f8-5cbb-429c-aa12-cd970a72867c", "external_reference": "REP-5", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-5"}
+{"timestamp": "2026-10-07T20:36:19.048183+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "6a332eb7-07e3-41af-8838-5d9c9f582d29", "external_reference": "REP-3", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-3"}
+{"timestamp": "2026-10-07T20:36:19.073152+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "8e18cbe6-9f0f-4401-8166-50f3c8d69f62", "external_reference": "REP-7", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-7"}
+{"timestamp": "2026-10-07T20:36:19.078562+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "fcfd649c-2d83-4885-abc7-49b120c46cd1", "external_reference": "REP-2", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-2"}
+{"timestamp": "2026-10-07T20:36:19.084066+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "c24e0364-eacc-47a2-8f8e-5b39aa647cb5", "external_reference": "REP-8", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-8"}
+{"timestamp": "2026-10-07T20:36:19.128720+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "2e436f51-dee1-4962-a7c2-18bf5a68bfa1", "external_reference": "REP-4", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-4"}
+{"timestamp": "2026-10-07T20:36:19.135370+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "50818a77-39f3-4fda-bc2c-d65a2ed644d3", "external_reference": "REP-0", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-0"}
+{"timestamp": "2026-10-07T20:36:19.150544+00:00", "event": "repayment", "status": "COMPLETED", "correlation_id": "7a94a08f-0064-4ab1-8f08-dcb60fe7cf2b", "external_reference": "REP-9", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "REP-9"}
+{"timestamp": "2026-10-07T20:36:19.251114+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "8dae186c-9805-46b8-addd-7f5d697216e0", "external_reference": "LN-DOWN", "client_uid": "CLT-DOWN", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.278781+00:00", "event": "disbursement", "status": "FAILED", "correlation_id": "824d1004-a7cc-4ff6-b580-5f315e72f117", "external_reference": "DISB-DOWN", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.313990+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "908973c0-2f1a-4dc0-9759-9dc733af02aa", "external_reference": "DISB-DOWN", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-DOWN"}
+{"timestamp": "2026-10-07T20:36:19.416593+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "d103f999-9fd9-4753-b91e-bac8dbecad7f", "external_reference": "LN-FTIME", "client_uid": "CLT-FTIME", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.448048+00:00", "event": "disbursement", "status": "FINERACT_PENDING", "correlation_id": "436f0766-b61f-4da8-bf23-36e08c312d4f", "external_reference": "DISB-FTIME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.461471+00:00", "event": "disbursement", "status": "IN_PROGRESS", "correlation_id": "fe514597-47e0-4717-a1b4-e4405d743d2b", "external_reference": "DISB-FTIME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.488913+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "1ad540a0-123c-46ed-bae1-29ca005e87ab", "external_reference": "DISB-FTIME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-FTIME"}
+{"timestamp": "2026-10-07T20:36:19.490871+00:00", "event": "recover", "status": "COMPLETED", "correlation_id": "1ad540a0-123c-46ed-bae1-29ca005e87ab", "external_reference": "DISB-FTIME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-FTIME"}
+{"timestamp": "2026-10-07T20:36:19.581842+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "398629c5-8863-446b-a5f7-a102a8eba5b9", "external_reference": "LN-ERPDOWN", "client_uid": "CLT-ERPDOWN", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.628062+00:00", "event": "journal", "status": "NEEDS_RECONCILIATION", "correlation_id": "5ebc0dad-8f9e-475b-97d1-5cb853ee0f32", "external_reference": "DISB-ERPDOWN", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.648759+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "2c148ecf-d8b2-4f39-a218-f8c74e25f6ea", "external_reference": "DISB-ERPDOWN", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-ERPDOWN"}
+{"timestamp": "2026-10-07T20:36:19.748837+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "58fdf73b-2c13-4481-b7fd-a0617578795b", "external_reference": "LN-ETIME", "client_uid": "CLT-ETIME", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.817678+00:00", "event": "journal", "status": "ERP_PENDING", "correlation_id": "0ebb6ec0-7abe-4e4b-ba8a-83d40e73d84a", "external_reference": "DISB-ETIME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-ETIME"}
+{"timestamp": "2026-10-07T20:36:19.841647+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "09c9c9a7-0bd3-482c-b479-99088946d28a", "external_reference": "DISB-ETIME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-ETIME"}
+{"timestamp": "2026-10-07T20:36:19.845152+00:00", "event": "recover", "status": "COMPLETED", "correlation_id": "09c9c9a7-0bd3-482c-b479-99088946d28a", "external_reference": "DISB-ETIME", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-ETIME"}
+{"timestamp": "2026-10-07T20:36:19.946795+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "ef6aea51-b161-4c44-bc9f-29116065f525", "external_reference": "LN-CRASH", "client_uid": "CLT-CRASH", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:19.980500+00:00", "event": "disbursement", "status": "FINERACT_DONE", "correlation_id": "0ffe331d-3285-488b-9968-1913c6f5d112", "external_reference": "DISB-CRASH", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:20.002396+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "", "external_reference": "DISB-CRASH", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-CRASH"}
+{"timestamp": "2026-10-07T20:36:20.006849+00:00", "event": "recover", "status": "COMPLETED", "correlation_id": "", "external_reference": "DISB-CRASH", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-CRASH"}
+{"timestamp": "2026-10-07T20:36:20.146470+00:00", "event": "loan", "status": "COMPLETED", "correlation_id": "2154607e-0fc2-423f-bc2f-359296e3a518", "external_reference": "LN-RECON", "client_uid": "CLT-RECON", "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": null}
+{"timestamp": "2026-10-07T20:36:20.224740+00:00", "event": "disbursement", "status": "COMPLETED", "correlation_id": "96445ce6-d349-4b37-bcc5-2b809e341eb3", "external_reference": "DISB-MATCH", "client_uid": null, "loan_reference": "FIN-2026-000001", "fineract_transaction_id": null, "erp_transaction_id": "DISB-MATCH"}

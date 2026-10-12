@@ -1,0 +1,260 @@
+{
+  "info": {
+    "name": "Fineract assessment seed",
+    "description": "Seed office, RWF, cash loan product, least-privilege user, and sample clients against the custom Fineract 1.15.0 image. Run POST {{integration}}/api/accounts/sync first so GL-1100, GL-1200, and GL-4000 exist through the patched create path. Extra GLs 2100 and 5000 are created for cash-product write-off and overpayment mappings that Fineract requires. Safe to re-import; several steps are idempotent by name or externalId.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "fineract", "value": "https://localhost:8443/fineract-provider/api/v1" },
+    { "key": "integration", "value": "http://localhost:8090" },
+    { "key": "partner_token", "value": "assessment-token" },
+    { "key": "tenant", "value": "default" },
+    { "key": "username", "value": "mifos" },
+    { "key": "password", "value": "password" },
+    { "key": "office_id", "value": "1" },
+    { "key": "bank_gl_id", "value": "" },
+    { "key": "receivable_gl_id", "value": "" },
+    { "key": "income_gl_id", "value": "" },
+    { "key": "liability_gl_id", "value": "" },
+    { "key": "expense_gl_id", "value": "" },
+    { "key": "product_id", "value": "" },
+    { "key": "role_id", "value": "" }
+  ],
+  "auth": {
+    "type": "basic",
+    "basic": [
+      { "key": "username", "value": "{{username}}" },
+      { "key": "password", "value": "{{password}}" }
+    ]
+  },
+  "item": [
+    {
+      "name": "0 sync chart via integration",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [{ "key": "token", "value": "{{partner_token}}" }]
+        },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{integration}}/api/accounts/sync",
+        "description": "Creates 1100, 1200, 4000 in Fineract through the patched GL create command."
+      }
+    },
+    {
+      "name": "1 rename office to Kigali Main Office",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Kigali Main Office\",\n  \"dateFormat\": \"yyyy-MM-dd\",\n  \"locale\": \"en\",\n  \"openingDate\": \"2009-01-01\"\n}"
+        },
+        "url": "{{fineract}}/offices/{{office_id}}"
+      }
+    },
+    {
+      "name": "2 enable currency RWF",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"currencies\": [\"USD\", \"RWF\"]\n}"
+        },
+        "url": "{{fineract}}/currencies"
+      }
+    },
+    {
+      "name": "3 list GL accounts",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const accounts = pm.response.json();",
+              "const byCode = Object.fromEntries(accounts.map(a => [String(a.glCode), a.id]));",
+              "if (byCode['1100']) pm.collectionVariables.set('bank_gl_id', String(byCode['1100']));",
+              "if (byCode['1200']) pm.collectionVariables.set('receivable_gl_id', String(byCode['1200']));",
+              "if (byCode['4000']) pm.collectionVariables.set('income_gl_id', String(byCode['4000']));",
+              "if (byCode['2100']) pm.collectionVariables.set('liability_gl_id', String(byCode['2100']));",
+              "if (byCode['5000']) pm.collectionVariables.set('expense_gl_id', String(byCode['5000']));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }],
+        "url": "{{fineract}}/glaccounts"
+      }
+    },
+    {
+      "name": "4 create overpayment liability GL-2100",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Loan Overpayment\",\n  \"glCode\": \"2100\",\n  \"manualEntriesAllowed\": true,\n  \"type\": \"2\",\n  \"usage\": \"1\",\n  \"description\": \"Overpayment liability\",\n  \"externalId\": \"GL-2100\",\n  \"currencyCode\": \"RWF\"\n}"
+        },
+        "url": "{{fineract}}/glaccounts"
+      }
+    },
+    {
+      "name": "5 create write-off expense GL-5000",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Loan Write Off\",\n  \"glCode\": \"5000\",\n  \"manualEntriesAllowed\": true,\n  \"type\": \"5\",\n  \"usage\": \"1\",\n  \"description\": \"Write-off expense\",\n  \"externalId\": \"GL-5000\",\n  \"currencyCode\": \"RWF\"\n}"
+        },
+        "url": "{{fineract}}/glaccounts"
+      }
+    },
+    {
+      "name": "6 create SME Asset Finance product",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "if (body.resourceId) pm.collectionVariables.set('product_id', String(body.resourceId));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"SME Asset Finance\",\n  \"shortName\": \"SMEA\",\n  \"currencyCode\": \"RWF\",\n  \"digitsAfterDecimal\": 0,\n  \"inMultiplesOf\": 1,\n  \"principal\": 5000000,\n  \"numberOfRepayments\": 12,\n  \"repaymentEvery\": 1,\n  \"repaymentFrequencyType\": 2,\n  \"interestRatePerPeriod\": 18,\n  \"interestRateFrequencyType\": 3,\n  \"amortizationType\": 1,\n  \"interestType\": 0,\n  \"interestCalculationPeriodType\": 1,\n  \"transactionProcessingStrategyCode\": \"mifos-standard-strategy\",\n  \"accountingRule\": 2,\n  \"daysInYearType\": 1,\n  \"daysInMonthType\": 1,\n  \"isInterestRecalculationEnabled\": false,\n  \"multiDisburseLoan\": false,\n  \"fundSourceAccountId\": {{bank_gl_id}},\n  \"loanPortfolioAccountId\": {{receivable_gl_id}},\n  \"transfersInSuspenseAccountId\": {{bank_gl_id}},\n  \"interestOnLoanAccountId\": {{income_gl_id}},\n  \"incomeFromFeeAccountId\": {{income_gl_id}},\n  \"incomeFromPenaltyAccountId\": {{income_gl_id}},\n  \"incomeFromRecoveryAccountId\": {{income_gl_id}},\n  \"writeOffAccountId\": {{expense_gl_id}},\n  \"overpaymentLiabilityAccountId\": {{liability_gl_id}},\n  \"goodwillCreditAccountId\": {{expense_gl_id}},\n  \"dateFormat\": \"yyyy-MM-dd\",\n  \"locale\": \"en\"\n}"
+        },
+        "url": "{{fineract}}/loanproducts",
+        "description": "Cash accounting (rule 2). Fund source 1100, portfolio 1200, interest 4000. No fees or penalties."
+      }
+    },
+    {
+      "name": "7 create least-privilege role",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "if (body.resourceId) pm.collectionVariables.set('role_id', String(body.resourceId));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Assessment API\",\n  \"description\": \"Least privilege for the partner integration\"\n}"
+        },
+        "url": "{{fineract}}/roles"
+      }
+    },
+    {
+      "name": "8 assign permissions to role",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"permissions\": {\n    \"READ_CLIENT\": true,\n    \"CREATE_CLIENT\": true,\n    \"READ_LOAN\": true,\n    \"CREATE_LOAN\": true,\n    \"APPROVE_LOAN\": true,\n    \"DISBURSE_LOAN\": true,\n    \"REPAYMENT_LOAN\": true,\n    \"READ_GLACCOUNT\": true,\n    \"CREATE_GLACCOUNT\": true\n  }\n}"
+        },
+        "url": "{{fineract}}/roles/{{role_id}}/permissions"
+      }
+    },
+    {
+      "name": "9 create least-privilege user",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"assessment_api\",\n  \"firstname\": \"Assessment\",\n  \"lastname\": \"API\",\n  \"email\": \"assessment@example.com\",\n  \"officeId\": {{office_id}},\n  \"staffId\": null,\n  \"roles\": [{{role_id}}],\n  \"sendPasswordToEmail\": false,\n  \"password\": \"QwE!5rTy#9uP0\",\n  \"repeatPassword\": \"QwE!5rTy#9uP0\"\n}"
+        },
+        "url": "{{fineract}}/users"
+      }
+    },
+    {
+      "name": "10 create sample client Amina",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"officeId\": {{office_id}},\n  \"firstname\": \"Amina\",\n  \"lastname\": \"Uwase\",\n  \"externalId\": \"CLT-AMINA\",\n  \"active\": true,\n  \"activationDate\": \"2026-10-07\",\n  \"legalFormId\": 1,\n  \"dateFormat\": \"yyyy-MM-dd\",\n  \"locale\": \"en\"\n}"
+        },
+        "url": "{{fineract}}/clients"
+      }
+    },
+    {
+      "name": "11 create sample client Jean",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"officeId\": {{office_id}},\n  \"firstname\": \"Jean\",\n  \"lastname\": \"Nkurunziza\",\n  \"externalId\": \"CLT-JEAN\",\n  \"active\": true,\n  \"activationDate\": \"2026-10-07\",\n  \"legalFormId\": 1,\n  \"dateFormat\": \"yyyy-MM-dd\",\n  \"locale\": \"en\"\n}"
+        },
+        "url": "{{fineract}}/clients"
+      }
+    },
+    {
+      "name": "12 create sample client Grace",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Fineract-Platform-TenantId", "value": "{{tenant}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"officeId\": {{office_id}},\n  \"firstname\": \"Grace\",\n  \"lastname\": \"Mukamana\",\n  \"externalId\": \"CLT-GRACE\",\n  \"active\": true,\n  \"activationDate\": \"2026-10-07\",\n  \"legalFormId\": 1,\n  \"dateFormat\": \"yyyy-MM-dd\",\n  \"locale\": \"en\"\n}"
+        },
+        "url": "{{fineract}}/clients"
+      }
+    }
+  ]
+}

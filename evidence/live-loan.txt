@@ -1,0 +1,87 @@
+## Live client create
+1. Initial state: Fineract already has CLT-AMINA from the seed.
+2. Request: POST /api/clients for CLT-AMINA.
+3. Response: HTTP 200 {"external_reference":"CL-LIVE-1","client_uid":"CLT-AMINA","first_name":"Amina","last_name":"Uwase"}
+4. Fineract state: client id 1, status Active.
+5. ERP state: unchanged.
+6. Integration state: mapped client without a Fineract numeric id in the response.
+7. Expected result: 200/201 public client fields only.
+8. Actual result: HTTP 200, no leaked Fineract id.
+9. Explanation: Partner API finds the seeded Fineract client by externalId CLT-AMINA.
+
+## Live loan create and approve
+1. Initial state: Client mapped.
+2. Request: POST /api/loans for FIN-2026-000003, principal 5000000 RWF, 18%, 12 months, submitted_on 2026-10-07.
+3. Response: HTTP 201 status APPROVED, fineract_status Approved, outstanding 5000000.000000.
+4. Fineract state: loanStatusType.approved, waitingForDisbursal true.
+5. ERP state: unchanged.
+6. Integration state: loan LN-LIVE-3 / FIN-2026-000003 APPROVED.
+7. Expected result: Approved with outstanding equal to principal.
+8. Actual result: HTTP 201, Approved, outstanding 5000000.
+9. Explanation: Product id 1 is SME Asset Finance from the Fineract seed. Create also approves.
+
+## Live disbursement
+1. Initial state: Approved loan, no disbursement, no journal.
+2. Request: POST /api/loans/FIN-2026-000003/disburse with FIN-2026-000003-DISB amount 5000000 on 2026-10-07.
+3. Response: HTTP 201 COMPLETED, Active, outstanding 5500799.000000 (principal plus schedule interest).
+4. Fineract state: Active, totalOutstanding 5500799.0.
+5. ERP state: journal FIN-2026-000003-DISB DR 1200 5000000, CR 1100 5000000.
+6. Integration state: transaction COMPLETED, disbursement_reference set.
+7. Expected result: one Fineract disbursement and one balanced ERP journal.
+8. Actual result: HTTP 201, Active, one journal.
+9. Explanation: Disbursement uses POST /loans/external-id/{id}?command=disburse with actualDisbursementDate. Transaction dates must not be after the Fineract JVM calendar day (UTC on this host).
+
+## Live repayment REP-LIVE-A
+1. Initial state: Active, outstanding 5500799.
+2. Request: POST repayment 500000 on 2026-10-07, reference REP-LIVE-A.
+3. Response: HTTP 201, principal 383400, interest 116600, outstanding 5000799.
+4. Fineract state: Active, outstanding 5000799.0.
+5. ERP state: DR 1100 500000, CR 1200 383400, CR 4000 116600.
+6. Integration state: COMPLETED.
+7. Expected result: portions from Fineract, one journal.
+8. Actual result: matches.
+9. Explanation: Interest and principal portions come from the Fineract transaction.
+
+## Live repayment REP-LIVE-B
+1. Initial state: Active, outstanding 5000799.
+2. Request: POST repayment 1000000, reference REP-LIVE-B.
+3. Response: HTTP 201, principal 851452, interest 148548, outstanding 4000799.
+4. Fineract state: Active, outstanding 4000799.0.
+5. ERP state: DR 1100 1000000, CR 1200 851452, CR 4000 148548.
+6. Integration state: COMPLETED.
+7. Expected result: second partial repayment applied once.
+8. Actual result: matches.
+9. Explanation: Same-day repayments are accepted when the date is not in the future for Fineract.
+
+## Live repayment REP-LIVE-C
+1. Initial state: Active, outstanding 4000799.
+2. Request: POST repayment 1000000, reference REP-LIVE-C.
+3. Response: HTTP 201, principal 903158, interest 96842, outstanding 3000799.
+4. Fineract state: Active, outstanding 3000799.0.
+5. ERP state: DR 1100 1000000, CR 1200 903158, CR 4000 96842.
+6. Integration state: COMPLETED.
+7. Expected result: third partial repayment applied once.
+8. Actual result: matches.
+9. Explanation: Three partial repayments before payoff, as required by the brief.
+
+## Live repayment payoff
+1. Initial state: Active, outstanding 3000799.
+2. Request: POST repayment 3000799, reference REP-LIVE-PAYOFF-FIN-2026-000003.
+3. Response: HTTP 201, principal 2861990, interest 138809, status CLOSED, fineract_status Closed (obligations met), outstanding 0.
+4. Fineract state: Closed (obligations met), totalOutstanding 0.0.
+5. ERP state: DR 1100 3000799, CR 1200 2861990, CR 4000 138809.
+6. Integration state: loan CLOSED, outstanding 0.000000.
+7. Expected result: Closed (obligations met), outstanding 0.
+8. Actual result: matches.
+9. Explanation: Payoff amount is the live Fineract outstanding after the three partials, not a hard-coded schedule total.
+
+## ERP balances after closed loan (tenant-wide)
+1. Initial state: Journals for this loan and earlier wet-run loans exist in the mock ERP.
+2. Request: GET /api/accounts/{1100,1200,4000}/balance.
+3. Response: 1100 balance -4499201.000000, 1200 balance 5000000.000000, 4000 balance 500799.000000.
+4. Fineract state: FIN-2026-000003 Closed (obligations met).
+5. ERP state: as above.
+6. Integration state: FIN-2026-000003 CLOSED.
+7. Expected result: for this loan alone, receivable credits equal the 5000000 disbursement; income equals interest collected (500799).
+8. Actual result: income 500799 matches the four repayments on FIN-2026-000003. Receivable 5000000 remains from an earlier unrepaid live loan (FIN-2026-000002) left from the first wet-run attempt.
+9. Explanation: Balances are tenant-wide. FIN-2026-000003 itself cleared its own receivable and recognized 500799 interest income.
