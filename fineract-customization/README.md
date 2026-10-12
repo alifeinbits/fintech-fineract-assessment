@@ -30,7 +30,7 @@ Do not commit the upstream clone into this repository.
 
 ## Tests
 
-Unit tests (5 passed):
+Unit tests (recorded under [`evidence/java-unit-tests.txt`](../evidence/java-unit-tests.txt)):
 
 ```bash
 ./gradlew :fineract-accounting:test \

@@ -72,7 +72,7 @@ From the logs, filter on `loan_reference`. Then read the loan and the transactio
 {"event": "disbursement", "status": "REPLAY", "external_reference": "FIN-2026-000001-DISB", "loan_reference": "FIN-2026-000001"}
 ```
 
-The one API call for the money movement is `GET /api/transactions/FIN-2026-000001-DISB`. The loan is `GET /api/loans/FIN-2026-000001`. The ERP journal id in the log is the external reference, which is also the mock ERP's key. `fineract_transaction_id` is null: the service stores the Fineract loan id privately and does not store the transaction resource id. The startup sweep has an empty `correlation_id` because it does not run inside a request.
+The one API call for the money movement is `GET /api/transactions/FIN-2026-000001-DISB`. The loan is `GET /api/loans/FIN-2026-000001`. The ERP journal id in the log is the external reference, which is also the mock ERP's key. `fineract_transaction_id` is the partner `external_reference` (Fineract transaction `externalId`); the numeric Fineract resource id stays private. The startup sweep has an empty `correlation_id` because it does not run inside a request.
 
 ## Reversals and overpayment
 
@@ -82,11 +82,14 @@ A reversal is a new journal with the opposite lines and external reference `{ori
 
 - Part L: GL master-data reconciliation beyond the transaction report, fees, a demonstrated overpayment, metrics, webhooks.
 - Posting of reversals.
-- Tenant bootstrap on the live image: Kigali Main Office, RWF, a cash product, and a least-privilege API user. The demo loan has not been run through that image to `Closed (obligations met)`.
 - A queue.
-- mypy. Ruff is the linter that was run. A type checker is not part of `make test-python`.
-- Regeneration of Fineract's OpenAPI client. The Java integration test speaks raw JSON and has not been run in Gradle.
-- The running integration-service container from the earlier image build does not contain the partner API, faults, or reconciliation until it is rebuilt.
+- Regeneration of Fineract's OpenAPI client. The Java integration test speaks raw JSON; unit tests for the GL rule are recorded in `evidence/java-unit-tests.txt`. `make test-python` now runs `mypy` on both Python apps after pytest.
+
+Tenant bootstrap (Kigali Main Office, RWF, cash product, least-privilege `assessment_api`, sample clients) and a live 5,000,000 RWF loan to `Closed (obligations met)` were run on the custom image; see `scripts/seed_fineract.py` and `evidence/live-loan.txt`.
+
+## Fineract API user
+
+Compose and default settings use `mifos` / `password` so a cold `docker compose up` can talk to Fineract before seed. After `scripts/seed_fineract.py`, switch the integration service to the least-privilege user by setting `FINERACT_USERNAME=assessment_api` and `FINERACT_PASSWORD=QwE!5rTy#9uP0` (and rebuild/recreate the container). Seed itself still authenticates as `mifos` to create that user.
 
 ## Known weaknesses
 
@@ -97,7 +100,6 @@ A reversal is a new journal with the opposite lines and external reference `{ori
 - Python tests and `make simulate` use SQLite. Runtime is MySQL. The unique constraints are the part that has to hold in both.
 - `create_all` does not migrate an existing MySQL `idempotency_keys` table. SQLite gets an `ALTER TABLE` for `loan_reference` when that column is missing.
 - Recovery of a `FINERACT_PENDING` row whose transaction cannot be found marks the operation `FAILED`.
-- A disbursement that fails before Fineract still holds the one-per-loan slot, so a different reference cannot disburse that loan. The same reference can retry.
-- Reconciliation compares amounts, not a separate transaction-type field.
-- The partner service is configured with the Fineract demo user `mifos` / `password`. A least-privilege user `assessment_api` exists; the integration service still uses `mifos` until that switch is made deliberately.
+- I2/I3 concurrency and Part J failure evidence from `make simulate` use stand-in Fineract/ERP objects. Live Fineract evidence covers GL create/replay/conflict and the Part D loan lifecycle.
 - Transaction dates follow the Fineract JVM calendar day. On this host that is UTC, so Africa/Kigali wall-clock dates can look like "tomorrow" and be rejected.
+- `partner_transactions.external_reference` is unique across operation kinds; disbursement and repayment must not share one string.

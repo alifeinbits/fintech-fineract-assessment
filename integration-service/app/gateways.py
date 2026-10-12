@@ -37,6 +37,7 @@ class PostedTransaction:
     amount: Decimal
     principal: Decimal
     interest: Decimal
+    kind: str = "UNKNOWN"
 
 
 def public_loan_status(fineract_status: str) -> str:
@@ -60,6 +61,8 @@ class HttpErp:
 
     def list_accounts(self) -> list[AccountSnapshot]:
         payload = self._json("GET", "/api/accounts")
+        if not isinstance(payload, list):
+            raise GatewayError("erp_error", "ERP accounts response was not a list")
         return [
             AccountSnapshot(
                 code=item["code"],
@@ -77,6 +80,16 @@ class HttpErp:
             return False
         self._raise(response)
         return True
+
+    def journal_kind(self, external_reference: str) -> str | None:
+        response = self._send("GET", f"/api/journal-entries/{external_reference}")
+        if response.status_code == 404:
+            return None
+        self._raise(response)
+        lines = response.json().get("lines") or []
+        return journal_kind_from_lines(
+            [(str(line["account_code"]), Decimal(str(line["debit"])), Decimal(str(line["credit"]))) for line in lines]
+        )
 
     def journal_total(self, external_reference: str) -> Decimal | None:
         response = self._send("GET", f"/api/journal-entries/{external_reference}")
@@ -328,4 +341,36 @@ def _transaction_from_payload(payload: dict) -> PostedTransaction:
     interest = Decimal(str(payload.get("interestPortion") or 0))
     if principal == 0 and interest == 0:
         principal = amount
-    return PostedTransaction(amount=amount, principal=principal, interest=interest)
+    return PostedTransaction(
+        amount=amount,
+        principal=principal,
+        interest=interest,
+        kind=_fineract_transaction_kind(payload),
+    )
+
+
+def _fineract_transaction_kind(payload: dict) -> str:
+    raw = payload.get("type")
+    label = ""
+    if isinstance(raw, dict):
+        label = str(raw.get("value") or raw.get("code") or "")
+    elif raw is not None:
+        label = str(raw)
+    text = label.lower()
+    if "disburse" in text:
+        return "DISBURSEMENT"
+    if "repay" in text:
+        return "REPAYMENT"
+    return "UNKNOWN"
+
+
+def journal_kind_from_lines(lines: list[tuple[str, Decimal, Decimal]]) -> str | None:
+    if not lines:
+        return None
+    bank_debit = any(code == "1100" and debit > 0 for code, debit, _credit in lines)
+    receivable_debit = any(code == "1200" and debit > 0 for code, debit, _credit in lines)
+    if bank_debit:
+        return "REPAYMENT"
+    if receivable_debit:
+        return "DISBURSEMENT"
+    return "UNKNOWN"

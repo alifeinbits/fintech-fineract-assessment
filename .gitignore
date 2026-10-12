@@ -16,3 +16,4 @@ evidence/*.db
 
 # Local-only submission draft (do not publish)
 docs/submission-email.txt
+docs/interview-prep.md

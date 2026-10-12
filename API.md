@@ -49,7 +49,7 @@ The key is `(operation_type, external_reference)`.
 Reads the ERP chart and creates any GL that is not already `SYNCED`. The response is 200. A Fineract failure marks that account `FAILED` and leaves the others alone. The next sync retries the failed code. The body does not include the Fineract resource id.
 
 ```json
-{"accounts": [{"code": "1100", "name": "Bank", "account_type": "ASSET", "status": "SYNCED"}]}
+{"accounts": [{"code": "1100", "name": "Bank", "type": "ASSET", "status": "SYNCED"}]}
 ```
 
 ### `POST /api/clients`
@@ -165,6 +165,6 @@ One to 100 items. The response is `{"results": [...]}` with `outcome`, `fineract
 
 The integration service calls `https://fineract:8443/fineract-provider/api/v1` with basic auth and `Fineract-Platform-TenantId: default`. Partners do not call Fineract directly.
 
-GL create is `POST /v1/glaccounts` with `externalId` and `currencyCode`. An identical account returns the existing resource. A conflicting payload is HTTP 403 with `error.msg.glaccount.externalid.conflict`. Fineract maps domain-rule exceptions to 403. The integration service surfaces that case as a conflict and does not create a second account.
+GL create is `POST /v1/glaccounts` with `externalId` and `currencyCode`. An identical account returns the existing resource. A conflicting payload is HTTP 403 with `error.msg.glaccount.externalid.conflict`. Fineract maps domain-rule exceptions to 403. `POST /api/accounts/sync` still returns HTTP 200; that account row is marked `FAILED` with the conflict message and is retried on the next sync. The service does not create a second GL.
 
 Loan commands used by the service: create, `command=approve`, `command=disburse`, `command=repayment`. Lookups use the external-id routes. A missing transaction is HTTP 404 from Fineract and means "not posted", which is how recovery avoids a blind retry.

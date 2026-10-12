@@ -12,12 +12,16 @@ def reconcile_reference(
 ) -> dict:
     posted = fineract.find_transaction(loan_reference, external_reference)
     erp_amount = erp.journal_total(external_reference)
+    erp_kind = erp.journal_kind(external_reference)
     fineract_amount = None if posted is None else posted.amount
+    fineract_kind = None if posted is None else posted.kind
     if posted is None:
         outcome = "MISSING_IN_FINERACT"
     elif erp_amount is None:
         outcome = "MISSING_IN_ERP"
     elif erp_amount != fineract_amount:
+        outcome = "AMOUNT_MISMATCH"
+    elif fineract_kind not in {None, "UNKNOWN"} and erp_kind not in {None, "UNKNOWN"} and fineract_kind != erp_kind:
         outcome = "AMOUNT_MISMATCH"
     else:
         outcome = "MATCHED"
@@ -27,4 +31,6 @@ def reconcile_reference(
         "outcome": outcome,
         "fineract_amount": None if fineract_amount is None else str(fineract_amount),
         "erp_amount": None if erp_amount is None else str(erp_amount),
+        "fineract_type": fineract_kind,
+        "erp_type": erp_kind,
     }

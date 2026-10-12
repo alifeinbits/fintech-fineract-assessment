@@ -1,3 +1,5 @@
+import logging
+from collections.abc import Generator
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, Request
@@ -20,9 +22,12 @@ from app.lifecycle import (
     repay,
     sync_accounts,
 )
+from app.observe import log_event
 from app.reconciliation import reconcile_reference
 from app.schemas import ClientCreate, DisbursementCreate, LoanCreate, ReconcileRequest, RepaymentCreate
 from app.settings import Settings, get_settings
+
+logger = logging.getLogger("integration")
 
 
 def create_app(
@@ -38,7 +43,11 @@ def create_app(
     app.state.fineract = fineract if fineract is not None else HttpFineract(settings)
     app.state.erp = erp if erp is not None else HttpErp(settings)
     with factory() as session:
-        recover(session, settings, app.state.fineract, app.state.erp)
+        try:
+            recover(session, settings, app.state.fineract, app.state.erp)
+        except Exception as exc:  # noqa: BLE001 — startup must not die on a sticky recover row
+            logger.exception("startup recover failed: %s", exc)
+            log_event("recover", "STARTUP_FAILED")
 
     faults = {
         "fineract_down",
@@ -72,7 +81,7 @@ def create_app(
             message = f"{loc}: {first.get('msg')}" if loc else str(first.get("msg"))
         return JSONResponse(status_code=422, content=_error("validation_error", message))
 
-    def db_session() -> Session:
+    def db_session() -> Generator[Session, None, None]:
         yield from session_scope(factory)
 
     def require_token(authorization: str | None = Header(default=None)) -> None:

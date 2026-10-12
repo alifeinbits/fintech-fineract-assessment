@@ -33,8 +33,14 @@ def test_fineract_down_then_retry_posts_once(tmp_path):
         assert down.status_code == 503
         assert down.json()["error"]["code"] == "fineract_down"
         assert fineract.disburse_posts == 0
-        recovered = client.post("/api/loans/LN-1/disburse", headers=HEADERS, json=DISBURSE)
-        assert recovered.status_code == 201
+        loan = client.get("/api/loans/LN-1", headers=HEADERS).json()
+        assert loan["disbursement_reference"] is None
+        other = client.post(
+            "/api/loans/LN-1/disburse",
+            headers=HEADERS,
+            json={"external_reference": "DISB-OTHER", "amount": "5000000", "transaction_date": "2026-10-07"},
+        )
+        assert other.status_code == 201
     assert fineract.disburse_posts == 1
 
 

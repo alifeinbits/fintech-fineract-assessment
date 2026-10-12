@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from collections.abc import Generator
 from contextvars import ContextVar
 from uuid import uuid4
 
@@ -59,7 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
-    def db_session() -> Session:
+    def db_session() -> Generator[Session, None, None]:
         yield from session_scope(factory)
 
     def require_token(authorization: str | None = Header(default=None)) -> None:

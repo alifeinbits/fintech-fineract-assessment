@@ -10,7 +10,10 @@ class JournalLine:
 
 
 def disbursement_entry(amount: Decimal, bank_code: str, receivable_code: str) -> list[JournalLine]:
-    """Cash disbursement: DR loan receivable, CR bank. Amount comes from Fineract."""
+    """Cash disbursement: DR loan receivable, CR bank.
+
+    Callers pass Fineract's posted disbursement amount (principal out), not a locally computed figure.
+    """
     if amount <= 0:
         raise ValueError("disbursement amount must be positive")
     return [

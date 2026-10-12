@@ -61,7 +61,7 @@ def _sync_one(session: Session, fineract: HttpFineract, account: AccountSnapshot
         return _account_out(row)
     row.fineract_resource_id = resource_id
     row.status = "SYNCED"
-    row.error_message = None
+    setattr(row, "error_message", None)
     session.commit()
     return _account_out(row)
 
@@ -241,6 +241,7 @@ def disburse(
             session, settings, erp, loan, row, body.external_reference, "DISBURSEMENT", body.amount, fault=fault
         )
     if fault == "fineract_down":
+        _release_disbursement_slot(session, loan, body.external_reference)
         _fail(session, row, "Fineract is down")
         log_event("disbursement", "FAILED", external_reference=body.external_reference, loan_reference=loan_reference)
         raise ApiError(503, "fineract_down", "Fineract is down")
@@ -257,19 +258,23 @@ def disburse(
         if view is None:
             raise GatewayError("fineract_error", "Fineract loan was not visible after disbursement")
         if fault == "fineract_timeout_after_send":
+            _mark_loan_disbursed(session, loan, body.external_reference)
             log_event(
                 "disbursement",
                 "FINERACT_PENDING",
                 external_reference=body.external_reference,
                 loan_reference=loan_reference,
+                fineract_transaction_id=body.external_reference,
             )
             raise ApiError(504, "fineract_timeout", "Fineract timed out after the disbursement was sent")
     except ApiError:
         raise
     except GatewayError as exc:
+        _release_disbursement_slot(session, loan, body.external_reference)
         _fail(session, row, exc.message)
         raise ApiError(exc.status_code, exc.code, exc.message) from exc
     _remember_loan(session, loan, view.status, view.outstanding)
+    _mark_loan_disbursed(session, loan, body.external_reference)
     mark(session, row, "FINERACT_DONE")
     _save_transaction(session, loan, body.external_reference, "DISBURSEMENT", posted, view.status, view.outstanding)
     if fault == "crash_before_erp":
@@ -278,6 +283,7 @@ def disburse(
             "FINERACT_DONE",
             external_reference=body.external_reference,
             loan_reference=loan_reference,
+            fineract_transaction_id=body.external_reference,
         )
         raise ApiError(500, "crashed", "process stopped before the ERP journal")
     return _complete_erp(
@@ -332,6 +338,7 @@ def repay(
                 "FINERACT_PENDING",
                 external_reference=body.external_reference,
                 loan_reference=loan_reference,
+                fineract_transaction_id=body.external_reference,
             )
             raise ApiError(504, "fineract_timeout", "Fineract timed out after the repayment was sent")
     except ApiError:
@@ -348,6 +355,7 @@ def repay(
             "FINERACT_DONE",
             external_reference=body.external_reference,
             loan_reference=loan_reference,
+            fineract_transaction_id=body.external_reference,
         )
         raise ApiError(500, "crashed", "process stopped before the ERP journal")
     return _complete_erp(
@@ -365,12 +373,21 @@ def recover(session: Session, settings: Settings, fineract: HttpFineract, erp: H
     ).all()
     results = []
     for row in rows:
-        results.append(_resume(session, settings, fineract, erp, row))
+        try:
+            outcome = _resume(session, settings, fineract, erp, row)
+        except (ApiError, GatewayError) as exc:
+            outcome = {
+                "external_reference": row.external_reference,
+                "status": row.status,
+                "error": exc.message if isinstance(exc, GatewayError) else exc.message,
+            }
+        results.append(outcome)
         log_event(
             "recover",
             results[-1]["status"],
             external_reference=row.external_reference,
             loan_reference=row.loan_reference,
+            fineract_transaction_id=row.external_reference if results[-1]["status"] == "COMPLETED" else None,
             erp_transaction_id=row.external_reference if results[-1]["status"] == "COMPLETED" else None,
         )
     return results
@@ -386,20 +403,53 @@ def _resume(
     if row.status == "FINERACT_PENDING":
         posted = fineract.find_transaction(loan.loan_reference, row.external_reference)
         if posted is None:
+            if kind == "DISBURSEMENT":
+                _release_disbursement_slot(session, loan, row.external_reference)
             _fail(session, row, "Fineract has no transaction for this reference")
             return {"external_reference": row.external_reference, "status": "FAILED"}
         view = fineract.find_loan(loan.loan_reference)
         if view is None:
             raise ApiError(502, "fineract_error", "Fineract loan was not visible during recovery")
         _remember_loan(session, loan, view.status, view.outstanding)
+        if kind == "DISBURSEMENT":
+            _mark_loan_disbursed(session, loan, row.external_reference)
         mark(session, row, "FINERACT_DONE")
         _save_transaction(session, loan, row.external_reference, kind, posted, view.status, view.outstanding)
+    transaction = _ensure_partner_transaction(session, fineract, loan, row, kind)
+    amount = Decimal(str(transaction.amount))
+    _status, _body = _complete_erp(session, settings, erp, loan, row, row.external_reference, kind, amount)
+    return {"external_reference": row.external_reference, "status": "COMPLETED"}
+
+
+def _ensure_partner_transaction(
+    session: Session,
+    fineract: HttpFineract,
+    loan: LoanRecord,
+    row: IdempotencyKey,
+    kind: str,
+) -> PartnerTransaction:
+    """Rebuild the local money row from Fineract when a crash left FINERACT_DONE without it."""
     transaction = session.scalar(
         select(PartnerTransaction).where(PartnerTransaction.external_reference == row.external_reference)
     )
-    amount = Decimal(str(transaction.amount)) if transaction is not None else Decimal("0")
-    _status, _body = _complete_erp(session, settings, erp, loan, row, row.external_reference, kind, amount)
-    return {"external_reference": row.external_reference, "status": "COMPLETED"}
+    if transaction is not None:
+        return transaction
+    posted = fineract.find_transaction(loan.loan_reference, row.external_reference)
+    if posted is None:
+        raise ApiError(409, "needs_reconciliation", "Fineract succeeded but the local transaction row is missing")
+    view = fineract.find_loan(loan.loan_reference)
+    if view is None:
+        raise ApiError(502, "fineract_error", "Fineract loan was not visible during recovery")
+    _remember_loan(session, loan, view.status, view.outstanding)
+    if kind == "DISBURSEMENT":
+        _mark_loan_disbursed(session, loan, row.external_reference)
+    _save_transaction(session, loan, row.external_reference, kind, posted, view.status, view.outstanding)
+    rebuilt = session.scalar(
+        select(PartnerTransaction).where(PartnerTransaction.external_reference == row.external_reference)
+    )
+    if rebuilt is None:
+        raise ApiError(409, "needs_reconciliation", "Fineract succeeded but the local transaction row is missing")
+    return rebuilt
 
 
 def _remember_loan_reference(session: Session, row: IdempotencyKey, loan_reference: str) -> None:
@@ -410,16 +460,14 @@ def _remember_loan_reference(session: Session, row: IdempotencyKey, loan_referen
 
 
 def _claim_disbursement_slot(session: Session, loan: LoanRecord, row: IdempotencyKey, external_reference: str) -> None:
+    """Reserve one disbursement per loan. Does not mark the loan disbursed until Fineract succeeds."""
     existing = session.scalar(select(LoanDisbursement).where(LoanDisbursement.loan_reference == loan.loan_reference))
     if existing is not None:
         if existing.external_reference == external_reference:
-            loan.disbursement_reference = external_reference
-            session.commit()
             return
         _fail(session, row, "loan already has a disbursement")
         raise ApiError(409, "conflict", "loan already has a disbursement")
     session.add(LoanDisbursement(loan_reference=loan.loan_reference, external_reference=external_reference))
-    loan.disbursement_reference = external_reference
     try:
         session.commit()
     except IntegrityError:
@@ -429,6 +477,27 @@ def _claim_disbursement_slot(session: Session, loan: LoanRecord, row: Idempotenc
             return
         _fail(session, row, "loan already has a disbursement")
         raise ApiError(409, "conflict", "loan already has a disbursement") from None
+
+
+def _mark_loan_disbursed(session: Session, loan: LoanRecord, external_reference: str) -> None:
+    loan.disbursement_reference = external_reference
+    session.commit()
+
+
+def _release_disbursement_slot(session: Session, loan: LoanRecord, external_reference: str) -> None:
+    """Drop a slot claimed before Fineract succeeded so another reference (or a retry) can proceed."""
+    existing = session.scalar(
+        select(LoanDisbursement).where(
+            LoanDisbursement.loan_reference == loan.loan_reference,
+            LoanDisbursement.external_reference == external_reference,
+        )
+    )
+    if existing is None:
+        return
+    if loan.disbursement_reference == external_reference:
+        setattr(loan, "disbursement_reference", None)
+    session.delete(existing)
+    session.commit()
 
 
 def get_transaction(session: Session, external_reference: str) -> dict:
@@ -473,6 +542,7 @@ def _complete_erp(
                 "ERP_PENDING",
                 external_reference=external_reference,
                 loan_reference=loan.loan_reference,
+                fineract_transaction_id=external_reference,
                 erp_transaction_id=external_reference,
             )
             raise ApiError(504, "erp_timeout", "ERP timed out after the journal was written")
@@ -487,6 +557,7 @@ def _complete_erp(
             "NEEDS_RECONCILIATION",
             external_reference=external_reference,
             loan_reference=loan.loan_reference,
+            fineract_transaction_id=external_reference,
         )
         raise ApiError(503, "needs_reconciliation", "Fineract succeeded and the ERP journal still needs posting") from exc
     transaction.status = "COMPLETED"
@@ -497,6 +568,7 @@ def _complete_erp(
         "COMPLETED",
         external_reference=external_reference,
         loan_reference=loan.loan_reference,
+        fineract_transaction_id=external_reference,
         erp_transaction_id=external_reference,
     )
     return _finish(session, row, public)
@@ -541,13 +613,14 @@ def _remember_loan(session: Session, loan: LoanRecord, fineract_status: str, out
     """Store Fineract status and outstanding without regressing concurrent repayments.
 
     Parallel repayments can finish out of order. A stale writer must not raise outstanding
-    or overwrite Closed with Active. Disbursement may still raise outstanding above principal
-    when interest is scheduled.
+    or overwrite Closed with Active. A loan already marked CLOSED may still need its
+    outstanding corrected downward when a later reader refreshes from Fineract.
+    Disbursement may still raise outstanding above principal when interest is scheduled.
     """
     session.refresh(loan)
     new_status = public_loan_status(fineract_status)
     current = Decimal(str(loan.outstanding))
-    if loan.status == "CLOSED":
+    if loan.status == "CLOSED" and new_status != "CLOSED":
         return
     before_active = loan.status in {"APPROVED", "SUBMITTED"}
     if new_status == "CLOSED" or outstanding <= current or before_active:

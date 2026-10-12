@@ -3,7 +3,7 @@ from decimal import Decimal
 from threading import Lock
 
 from app.errors import GatewayError
-from app.gateways import AccountSnapshot, ClientSnapshot, LoanSnapshot, PostedTransaction
+from app.gateways import AccountSnapshot, ClientSnapshot, LoanSnapshot, PostedTransaction, journal_kind_from_lines
 
 SEED = (
     AccountSnapshot("1100", "Bank", "ASSET", "RWF", "GL-1100"),
@@ -30,6 +30,12 @@ class FakeErp:
         if lines is None:
             return None
         return sum((debit for _code, debit, _credit in lines), Decimal("0"))
+
+    def journal_kind(self, external_reference: str) -> str | None:
+        lines = self.journals.get(external_reference)
+        if lines is None:
+            return None
+        return journal_kind_from_lines(lines)
 
     def create_journal(self, external_reference: str, lines: list[tuple[str, Decimal, Decimal]]) -> None:
         with self._lock:
@@ -110,7 +116,7 @@ class FakeFineract:
                 self.fail_disburse_remaining -= 1
                 raise GatewayError("fineract_down", "Fineract request failed", 503)
             self.disburse_posts += 1
-            posted = PostedTransaction(amount, amount, Decimal("0"))
+            posted = PostedTransaction(amount, amount, Decimal("0"), kind="DISBURSEMENT")
             self.transactions[(loan_reference, external_reference)] = posted
             current = self.loans[loan_reference]
             self.loans[loan_reference] = LoanSnapshot(current.fineract_id, "Active", amount)
@@ -130,7 +136,7 @@ class FakeFineract:
                 raise GatewayError("fineract_error", "Fineract rejected the request")
             status = "Closed (obligations met)" if remaining == 0 else "Active"
             self.loans[loan_reference] = LoanSnapshot(current.fineract_id, status, remaining)
-            posted = PostedTransaction(amount, principal, interest)
+            posted = PostedTransaction(amount, principal, interest, kind="REPAYMENT")
             self.transactions[(loan_reference, external_reference)] = posted
             return posted
 

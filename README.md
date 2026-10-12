@@ -35,6 +35,8 @@ Seed Fineract after the stack is healthy: sync the chart through the integration
 .venv/bin/python scripts/seed_fineract.py
 ```
 
+Compose keeps `FINERACT_USERNAME=mifos` so a cold stack can talk to Fineract before seed. After seed, point the integration service at the least-privilege user (`assessment_api` / `QwE!5rTy#9uP0`) via env and recreate that container. See [DECISIONS.md](DECISIONS.md).
+
 Build the custom Fineract image before the first `docker compose up`. Clone tag `1.15.0` into `upstream/fineract` (gitignored), apply the patch, then build:
 
 ```bash
@@ -55,7 +57,7 @@ pip install -r mock-erp/requirements-dev.txt -r integration-service/requirements
 cd mock-erp && python -m pytest && cd ../integration-service && python -m pytest
 ```
 
-`make test-python` runs the same pytest commands. `make simulate` reprints the nine-field evidence in [evidence/simulations.txt](evidence/simulations.txt). Both use stand-ins. They do not start Docker.
+`make test-python` runs the same pytest commands plus `mypy` on both Python apps (`make test-mypy` alone). `make simulate` reprints the nine-field evidence in [evidence/simulations.txt](evidence/simulations.txt). Pytest and simulate use stand-ins. They do not start Docker.
 
 Java unit tests for the GL rule, from `upstream/fineract`:
 
