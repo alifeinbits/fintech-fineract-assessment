@@ -7,9 +7,11 @@ import json
 import sys
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 INTEGRATION = "http://localhost:8090"
 FINERACT = "https://localhost:8443/fineract-provider/api/v1"
 ERP = "http://localhost:8001"
@@ -41,9 +43,9 @@ def main() -> int:
         evidence.append(_erp_balances(client))
 
     out = "\n\n".join(evidence) + "\n"
-    path = "/home/alifeinbits/fintech-fineract-assessment/evidence/live-loan.txt"
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(out)
+    path = REPO_ROOT / "evidence" / "live-loan.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(out, encoding="utf-8")
     print(out)
     print(f"wrote {path}", file=sys.stderr)
     return 0
