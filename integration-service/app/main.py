@@ -115,7 +115,7 @@ def create_app(
 
     @app.get("/api/loans/{loan_reference}", dependencies=[Depends(require_token)])
     def read_loan(loan_reference: str, session: Session = Depends(db_session)) -> JSONResponse:
-        return JSONResponse(content=get_loan(session, loan_reference))
+        return JSONResponse(content=get_loan(session, loan_reference, app.state.fineract))
 
     @app.post("/api/loans/{loan_reference}/disburse", dependencies=[Depends(require_token)])
     def post_disburse(

@@ -200,10 +200,15 @@ def create_loan(session: Session, fineract: HttpFineract, body: LoanCreate) -> t
     return _finish(session, row, _loan_out(record).model_dump(mode="json"))
 
 
-def get_loan(session: Session, loan_reference: str) -> dict:
+def get_loan(session: Session, loan_reference: str, fineract: HttpFineract | None = None) -> dict:
     record = session.scalar(select(LoanRecord).where(LoanRecord.loan_reference == loan_reference))
     if record is None:
         raise ApiError(404, "not_found", "loan does not exist")
+    if fineract is not None:
+        view = fineract.find_loan(loan_reference)
+        if view is not None:
+            _remember_loan(session, record, view.status, view.outstanding)
+            session.refresh(record)
     return _loan_out(record).model_dump(mode="json")
 
 
@@ -533,10 +538,23 @@ def _save_transaction(
 
 
 def _remember_loan(session: Session, loan: LoanRecord, fineract_status: str, outstanding: Decimal) -> None:
-    loan.fineract_status = fineract_status
-    loan.status = public_loan_status(fineract_status)
-    loan.outstanding = outstanding
-    session.commit()
+    """Store Fineract status and outstanding without regressing concurrent repayments.
+
+    Parallel repayments can finish out of order. A stale writer must not raise outstanding
+    or overwrite Closed with Active. Disbursement may still raise outstanding above principal
+    when interest is scheduled.
+    """
+    session.refresh(loan)
+    new_status = public_loan_status(fineract_status)
+    current = Decimal(str(loan.outstanding))
+    if loan.status == "CLOSED":
+        return
+    before_active = loan.status in {"APPROVED", "SUBMITTED"}
+    if new_status == "CLOSED" or outstanding <= current or before_active:
+        loan.fineract_status = fineract_status
+        loan.status = new_status
+        loan.outstanding = outstanding
+        session.commit()
 
 
 def _require_loan(session: Session, loan_reference: str) -> LoanRecord:
