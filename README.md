@@ -35,10 +35,11 @@ Seed Fineract after the stack is healthy: sync the chart through the integration
 .venv/bin/python scripts/seed_fineract.py
 ```
 
-Build the custom Fineract image before the first `docker compose up`. From `upstream/fineract` (tag 1.15.0 plus `fineract-customization/gl-external-reference.patch`):
+Build the custom Fineract image before the first `docker compose up`. Clone tag `1.15.0` into `upstream/fineract` (gitignored), apply the patch, then build:
 
 ```bash
-./gradlew :fineract-provider:jibDockerBuild
+git -C upstream/fineract apply fineract-customization/gl-external-reference.patch
+cd upstream/fineract && ./gradlew :fineract-provider:jibDockerBuild
 ```
 
 Jib tags the local image `fineract:1.15.0`. Compose does not build Fineract itself. The 1.15.0 image ships the PostgreSQL driver only. MySQL Connector/J is mounted at `/app/plugins`, which is on Fineract's extra classpath. The jar in `docker/fineract/plugins` is the one `./gradlew :fineract-provider:copyDatabaseDriverPlugins` resolves (`mysql-connector-j` 9.7.0).

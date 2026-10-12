@@ -243,9 +243,9 @@ def _erp_timeout() -> str:
 
 
 def _crash_before_erp() -> str:
-    path = Path("/tmp/assessment-crash-sim.db")
-    if path.exists():
-        path.unlink()
+    database = tempfile.NamedTemporaryFile(prefix="assessment-crash-sim-", suffix=".db", delete=False)
+    database.close()
+    path = Path(database.name)
     settings = Settings(database_url=f"sqlite:///{path}", retry_backoff_seconds=0)
     fineract = FakeFineract()
     erp = FakeErp()

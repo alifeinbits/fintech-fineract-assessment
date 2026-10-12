@@ -4,13 +4,21 @@ Apache Fineract `1.15.0` (`d5636847ac556c30b437254c353f05526d172b97`) stores no 
 
 ## Apply
 
+From a Fineract clone next to this assessment repo:
+
 ```bash
 git clone --branch 1.15.0 --depth 1 https://github.com/apache/fineract.git
 cd fineract
-git apply /path/to/gl-external-reference.patch
+git apply ../fintech-fineract-assessment/fineract-customization/gl-external-reference.patch
 ```
 
-The local tree this patch was taken from is `upstream/fineract` (gitignored). Do not commit that clone into this repository.
+In this repository the working tree is `upstream/fineract` (gitignored). From the assessment root:
+
+```bash
+git -C upstream/fineract apply fineract-customization/gl-external-reference.patch
+```
+
+Do not commit the upstream clone into this repository.
 
 ## Behavior
 
