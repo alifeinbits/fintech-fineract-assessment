@@ -13,3 +13,6 @@ build/
 evidence/*.db
 .idea/
 .vscode/
+
+# Local-only submission draft (do not publish)
+docs/submission-email.txt
