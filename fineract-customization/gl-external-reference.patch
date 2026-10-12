@@ -1,0 +1,576 @@
+diff --git a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountsApiResourceSwagger.java b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountsApiResourceSwagger.java
+index ca97d53..368e723 100644
+--- a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountsApiResourceSwagger.java
++++ b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountsApiResourceSwagger.java
+@@ -134,6 +134,12 @@ final class GLAccountsApiResourceSwagger {
+         @Schema(example = "Desc")
+         public String description;
+ 
++        @Schema(example = "GL-1200")
++        public String externalId;
++
++        @Schema(example = "RWF")
++        public String currencyCode;
++
+     }
+ 
+     @Schema(description = "PostGLAccountsResponse")
+diff --git a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/command/GLAccountCommand.java b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/command/GLAccountCommand.java
+index f7b673e..ec2f9f9 100644
+--- a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/command/GLAccountCommand.java
++++ b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/command/GLAccountCommand.java
+@@ -32,7 +32,7 @@ import org.apache.fineract.infrastructure.core.exception.PlatformApiDataValidati
+  */
+ 
+ public record GLAccountCommand(Long id, String name, Long parentId, String glCode, Boolean disabled, Boolean manualEntriesAllowed,
+-        Integer type, Integer usage, String description, Long tagId) {
++        Integer type, Integer usage, String description, Long tagId, String externalId, String currencyCode) {
+ 
+     public void validateForCreate() {
+ 
+@@ -63,6 +63,12 @@ public record GLAccountCommand(Long id, String name, Long parentId, String glCod
+         baseDataValidator.reset().parameter(GLAccountJsonInputParams.TAGID.getValue()).value(this.tagId).ignoreIfNull()
+                 .longGreaterThanZero();
+ 
++        baseDataValidator.reset().parameter(GLAccountJsonInputParams.EXTERNAL_ID.getValue()).value(this.externalId).ignoreIfNull()
++                .notExceedingLengthOf(100);
++
++        baseDataValidator.reset().parameter(GLAccountJsonInputParams.CURRENCY_CODE.getValue()).value(this.currencyCode).ignoreIfNull()
++                .notExceedingLengthOf(3);
++
+         if (!dataValidationErrors.isEmpty()) {
+             throw new PlatformApiDataValidationException("validation.msg.validation.errors.exist", "Validation errors exist.",
+                     dataValidationErrors);
+diff --git a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/exception/GLAccountExternalReferenceConflictException.java b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/exception/GLAccountExternalReferenceConflictException.java
+new file mode 100644
+index 0000000..46c28b8
+--- /dev/null
++++ b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/exception/GLAccountExternalReferenceConflictException.java
+@@ -0,0 +1,33 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied. See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.fineract.accounting.glaccount.exception;
++
++import org.apache.fineract.infrastructure.core.exception.AbstractPlatformDomainRuleException;
++
++/**
++ * Same external id, different GL payload. Fineract maps domain-rule exceptions to HTTP 403, which is its equivalent of
++ * 409 Conflict.
++ */
++public class GLAccountExternalReferenceConflictException extends AbstractPlatformDomainRuleException {
++
++    public GLAccountExternalReferenceConflictException(final String externalId) {
++        super("error.msg.glaccount.externalid.conflict",
++                "General Ledger Account external id " + externalId + " already exists with a different payload", externalId);
++    }
++}
+diff --git a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/serialization/GLAccountCommandFromApiJsonDeserializer.java b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/serialization/GLAccountCommandFromApiJsonDeserializer.java
+index 5695a3e..e8eefa9 100644
+--- a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/serialization/GLAccountCommandFromApiJsonDeserializer.java
++++ b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/serialization/GLAccountCommandFromApiJsonDeserializer.java
+@@ -65,7 +65,10 @@ public final class GLAccountCommandFromApiJsonDeserializer extends AbstractFromA
+         final Integer usage = this.fromApiJsonHelper.extractIntegerSansLocaleNamed(GLAccountJsonInputParams.USAGE.getValue(), element);
+         final String description = this.fromApiJsonHelper.extractStringNamed(GLAccountJsonInputParams.DESCRIPTION.getValue(), element);
+         final Long tagId = this.fromApiJsonHelper.extractLongNamed(GLAccountJsonInputParams.TAGID.getValue(), element);
++        final String externalId = this.fromApiJsonHelper.extractStringNamed(GLAccountJsonInputParams.EXTERNAL_ID.getValue(), element);
++        final String currencyCode = this.fromApiJsonHelper.extractStringNamed(GLAccountJsonInputParams.CURRENCY_CODE.getValue(), element);
+ 
+-        return new GLAccountCommand(id, name, parentId, glCode, disabled, manualEntriesAllowed, type, usage, description, tagId);
++        return new GLAccountCommand(id, name, parentId, glCode, disabled, manualEntriesAllowed, type, usage, description, tagId, externalId,
++                currencyCode);
+     }
+ }
+diff --git a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountExternalReferenceSync.java b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountExternalReferenceSync.java
+new file mode 100644
+index 0000000..e3b9b13
+--- /dev/null
++++ b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountExternalReferenceSync.java
+@@ -0,0 +1,40 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied. See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.fineract.accounting.glaccount.service;
++
++import java.util.Objects;
++import org.apache.fineract.accounting.glaccount.domain.GLAccount;
++
++/**
++ * Compares the ERP identity of a GL account: code, name, type, and currency. Usage and description are Fineract-only.
++ */
++public final class GLAccountExternalReferenceSync {
++
++    private GLAccountExternalReferenceSync() {}
++
++    public static boolean matches(final GLAccount account, final String glCode, final String name, final Integer type,
++            final String currencyCode) {
++        return Objects.equals(account.getGlCode(), glCode) && Objects.equals(account.getName(), name)
++                && Objects.equals(account.getType(), type) && Objects.equals(normalize(account.getCurrencyCode()), normalize(currencyCode));
++    }
++
++    private static String normalize(final String value) {
++        return value == null ? "" : value.trim().toUpperCase();
++    }
++}
+diff --git a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountReadPlatformServiceImpl.java b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountReadPlatformServiceImpl.java
+index aa21b56..3809819 100644
+--- a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountReadPlatformServiceImpl.java
++++ b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountReadPlatformServiceImpl.java
+@@ -69,8 +69,8 @@ public class GLAccountReadPlatformServiceImpl implements GLAccountReadPlatformSe
+             sb.append(
+                     " gl.id as id, name as name, parent_id as parentId, gl_code as glCode, disabled as disabled, manual_journal_entries_allowed as manualEntriesAllowed, ")
+                     .append("classification_enum as classification, account_usage as accountUsage, gl.description as description, ")
+-                    .append(NAME_DECORATED_BASE_ON_HIERARCHY).append(" as nameDecorated, ")
+-                    .append("cv.id as codeId, cv.code_value as codeValue ");
++                    .append("gl.external_id as externalId, gl.currency_code as currencyCode, ").append(NAME_DECORATED_BASE_ON_HIERARCHY)
++                    .append(" as nameDecorated, ").append("cv.id as codeId, cv.code_value as codeValue ");
+             if (this.associationParametersData.isRunningBalanceRequired()) {
+                 sb.append(",gl_j.organization_running_balance as organizationRunningBalance ");
+             }
+@@ -103,9 +103,12 @@ public class GLAccountReadPlatformServiceImpl implements GLAccountReadPlatformSe
+             if (associationParametersData.isRunningBalanceRequired()) {
+                 organizationRunningBalance = rs.getLong("organizationRunningBalance");
+             }
++            final String externalId = rs.getString("externalId");
++            final String currencyCode = rs.getString("currencyCode");
+             return new GLAccountData().setId(id).setName(name).setParentId(parentId).setGlCode(glCode).setDisabled(disabled)
+                     .setManualEntriesAllowed(manualEntriesAllowed).setType(accountType).setUsage(usage).setDescription(description)
+-                    .setNameDecorated(nameDecorated).setTagId(tagId).setOrganizationRunningBalance(organizationRunningBalance);
++                    .setExternalId(externalId).setCurrencyCode(currencyCode).setNameDecorated(nameDecorated).setTagId(tagId)
++                    .setOrganizationRunningBalance(organizationRunningBalance);
+         }
+     }
+ 
+diff --git a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountWritePlatformServiceJpaRepositoryImpl.java b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountWritePlatformServiceJpaRepositoryImpl.java
+index 0b86e2f..32b5cc2 100644
+--- a/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountWritePlatformServiceJpaRepositoryImpl.java
++++ b/fineract-accounting/src/main/java/org/apache/fineract/accounting/glaccount/service/GLAccountWritePlatformServiceJpaRepositoryImpl.java
+@@ -19,7 +19,9 @@
+ package org.apache.fineract.accounting.glaccount.service;
+ 
+ import java.util.Map;
++import java.util.Optional;
+ import lombok.RequiredArgsConstructor;
++import org.apache.commons.lang3.StringUtils;
+ import org.apache.fineract.accounting.common.AccountingConstants;
+ import org.apache.fineract.accounting.glaccount.api.GLAccountJsonInputParams;
+ import org.apache.fineract.accounting.glaccount.command.GLAccountCommand;
+@@ -28,6 +30,7 @@ import org.apache.fineract.accounting.glaccount.domain.GLAccountRepository;
+ import org.apache.fineract.accounting.glaccount.domain.GLAccountType;
+ import org.apache.fineract.accounting.glaccount.exception.GLAccountDisableException;
+ import org.apache.fineract.accounting.glaccount.exception.GLAccountDuplicateException;
++import org.apache.fineract.accounting.glaccount.exception.GLAccountExternalReferenceConflictException;
+ import org.apache.fineract.accounting.glaccount.exception.GLAccountInvalidDeleteException;
+ import org.apache.fineract.accounting.glaccount.exception.GLAccountInvalidDeleteException.GlAccountInvalidDeleteReason;
+ import org.apache.fineract.accounting.glaccount.exception.GLAccountInvalidParentException;
+@@ -91,7 +94,27 @@ public class GLAccountWritePlatformServiceJpaRepositoryImpl implements GLAccount
+                 glAccountTagType = retrieveTagId(tagId, accountType);
+             }
+ 
++            final String externalId = StringUtils
++                    .trimToNull(command.stringValueOfParameterNamed(GLAccountJsonInputParams.EXTERNAL_ID.getValue()));
++            final String currencyCode = StringUtils
++                    .trimToNull(command.stringValueOfParameterNamed(GLAccountJsonInputParams.CURRENCY_CODE.getValue()));
++            final String normalizedCurrency = currencyCode == null ? null : currencyCode.toUpperCase();
++            if (externalId != null) {
++                final Optional<GLAccount> existing = this.glAccountRepository.findOneByExternalId(externalId);
++                if (existing.isPresent()) {
++                    final String glCode = command.stringValueOfParameterNamed(GLAccountJsonInputParams.GL_CODE.getValue());
++                    final String name = command.stringValueOfParameterNamed(GLAccountJsonInputParams.NAME.getValue());
++                    if (GLAccountExternalReferenceSync.matches(existing.get(), glCode, name, accountType.getValue(), normalizedCurrency)) {
++                        return new CommandProcessingResultBuilder().withCommandId(command.commandId()).withEntityId(existing.get().getId())
++                                .build();
++                    }
++                    throw new GLAccountExternalReferenceConflictException(externalId);
++                }
++            }
++
+             final GLAccount glAccount = GLAccount.fromJson(parentGLAccount, command, glAccountTagType);
++            glAccount.setExternalId(externalId);
++            glAccount.setCurrencyCode(normalizedCurrency);
+ 
+             this.glAccountRepository.saveAndFlush(glAccount);
+ 
+@@ -239,7 +262,12 @@ public class GLAccountWritePlatformServiceJpaRepositoryImpl implements GLAccount
+      */
+     private void handleGLAccountDataIntegrityIssues(final JsonCommand command, final Throwable realCause,
+             final NonTransientDataAccessException dve) {
+-        if (realCause.getMessage().contains("acc_gl_code")) {
++        if (realCause.getMessage() != null && realCause.getMessage().contains("acc_gl_external_id")) {
++            final String externalId = command.stringValueOfParameterNamed(GLAccountJsonInputParams.EXTERNAL_ID.getValue());
++            throw new GLAccountExternalReferenceConflictException(externalId);
++        }
++
++        if (realCause.getMessage() != null && realCause.getMessage().contains("acc_gl_code")) {
+             final String glCode = command.stringValueOfParameterNamed(GLAccountJsonInputParams.GL_CODE.getValue());
+             throw new GLAccountDuplicateException(glCode);
+         }
+diff --git a/fineract-accounting/src/test/java/org/apache/fineract/accounting/glaccount/service/GLAccountExternalReferenceSyncTest.java b/fineract-accounting/src/test/java/org/apache/fineract/accounting/glaccount/service/GLAccountExternalReferenceSyncTest.java
+new file mode 100644
+index 0000000..f1cf6f2
+--- /dev/null
++++ b/fineract-accounting/src/test/java/org/apache/fineract/accounting/glaccount/service/GLAccountExternalReferenceSyncTest.java
+@@ -0,0 +1,43 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied. See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.fineract.accounting.glaccount.service;
++
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import org.apache.fineract.accounting.glaccount.domain.GLAccount;
++import org.junit.jupiter.api.Test;
++
++class GLAccountExternalReferenceSyncTest {
++
++    @Test
++    void matchesIdenticalPayloadAndCurrencyCase() {
++        GLAccount account = new GLAccount().setGlCode("1200").setName("Loan Receivable").setType(1).setCurrencyCode("rwf");
++        assertTrue(GLAccountExternalReferenceSync.matches(account, "1200", "Loan Receivable", 1, "RWF"));
++    }
++
++    @Test
++    void rejectsDifferentNameOrCodeOrType() {
++        GLAccount account = new GLAccount().setGlCode("1200").setName("Loan Receivable").setType(1).setCurrencyCode("RWF");
++        assertFalse(GLAccountExternalReferenceSync.matches(account, "1200", "Other", 1, "RWF"));
++        assertFalse(GLAccountExternalReferenceSync.matches(account, "1100", "Loan Receivable", 1, "RWF"));
++        assertFalse(GLAccountExternalReferenceSync.matches(account, "1200", "Loan Receivable", 4, "RWF"));
++        assertFalse(GLAccountExternalReferenceSync.matches(account, "1200", "Loan Receivable", 1, "USD"));
++    }
++}
+diff --git a/fineract-accounting/src/test/java/org/apache/fineract/accounting/glaccount/service/GLAccountWritePlatformServiceJpaRepositoryImplTest.java b/fineract-accounting/src/test/java/org/apache/fineract/accounting/glaccount/service/GLAccountWritePlatformServiceJpaRepositoryImplTest.java
+index fe41bbf..d564f97 100644
+--- a/fineract-accounting/src/test/java/org/apache/fineract/accounting/glaccount/service/GLAccountWritePlatformServiceJpaRepositoryImplTest.java
++++ b/fineract-accounting/src/test/java/org/apache/fineract/accounting/glaccount/service/GLAccountWritePlatformServiceJpaRepositoryImplTest.java
+@@ -20,17 +20,27 @@ package org.apache.fineract.accounting.glaccount.service;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.lenient;
++import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import java.util.Optional;
++import org.apache.fineract.accounting.glaccount.api.GLAccountJsonInputParams;
++import org.apache.fineract.accounting.glaccount.command.GLAccountCommand;
+ import org.apache.fineract.accounting.glaccount.domain.GLAccount;
+ import org.apache.fineract.accounting.glaccount.domain.GLAccountRepository;
++import org.apache.fineract.accounting.glaccount.exception.GLAccountExternalReferenceConflictException;
++import org.apache.fineract.accounting.glaccount.serialization.GLAccountCommandFromApiJsonDeserializer;
+ import org.apache.fineract.accounting.journalentry.domain.JournalEntry;
+ import org.apache.fineract.accounting.journalentry.domain.JournalEntryRepository;
+ import org.apache.fineract.accounting.producttoaccountmapping.domain.ProductToGLAccountMapping;
+ import org.apache.fineract.accounting.producttoaccountmapping.domain.ProductToGLAccountMappingRepository;
++import org.apache.fineract.infrastructure.codes.domain.CodeValueRepositoryWrapper;
++import org.apache.fineract.infrastructure.core.api.JsonCommand;
+ import org.apache.fineract.infrastructure.core.data.CommandProcessingResult;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
+@@ -40,6 +50,7 @@ import org.mockito.InjectMocks;
+ import org.mockito.Mock;
+ import org.mockito.junit.jupiter.MockitoExtension;
+ import org.springframework.data.jpa.domain.Specification;
++import org.springframework.jdbc.core.JdbcTemplate;
+ 
+ @ExtendWith(MockitoExtension.class)
+ class GLAccountWritePlatformServiceJpaRepositoryImplTest {
+@@ -53,6 +64,15 @@ class GLAccountWritePlatformServiceJpaRepositoryImplTest {
+     @Mock
+     private ProductToGLAccountMappingRepository productToGLAccountMappingRepository;
+ 
++    @Mock
++    private GLAccountCommandFromApiJsonDeserializer fromApiJsonDeserializer;
++
++    @Mock
++    private CodeValueRepositoryWrapper codeValueRepositoryWrapper;
++
++    @Mock
++    private JdbcTemplate jdbcTemplate;
++
+     @InjectMocks
+     private GLAccountWritePlatformServiceJpaRepositoryImpl glAccountWritePlatformService;
+ 
+@@ -85,4 +105,44 @@ class GLAccountWritePlatformServiceJpaRepositoryImplTest {
+         assertEquals(GL_ACCOUNT_ID, result.getResourceId());
+         verify(glAccountRepository, times(1)).delete(glAccount);
+     }
++
++    @Test
++    void createWithSameExternalReferenceReturnsExistingAccount() {
++        GLAccount existing = new GLAccount().setGlCode("1200").setName("Loan Receivable").setType(1).setCurrencyCode("RWF");
++        existing.setId(55L);
++        JsonCommand command = glCommand("Loan Receivable");
++        when(glAccountRepository.findOneByExternalId("GL-1200")).thenReturn(Optional.of(existing));
++
++        CommandProcessingResult result = glAccountWritePlatformService.createGLAccount(command);
++
++        assertEquals(55L, result.getResourceId());
++        verify(glAccountRepository, never()).saveAndFlush(any());
++    }
++
++    @Test
++    void createWithSameExternalReferenceAndDifferentPayloadConflicts() {
++        GLAccount existing = new GLAccount().setGlCode("1200").setName("Loan Receivable").setType(1).setCurrencyCode("RWF");
++        existing.setId(55L);
++        JsonCommand command = glCommand("Other name");
++        when(glAccountRepository.findOneByExternalId("GL-1200")).thenReturn(Optional.of(existing));
++
++        assertThrows(GLAccountExternalReferenceConflictException.class, () -> glAccountWritePlatformService.createGLAccount(command));
++        verify(glAccountRepository, never()).saveAndFlush(any());
++    }
++
++    private JsonCommand glCommand(final String name) {
++        JsonCommand command = org.mockito.Mockito.mock(JsonCommand.class);
++        when(command.json()).thenReturn("{}");
++        lenient().when(command.commandId()).thenReturn(1L);
++        when(command.longValueOfParameterNamed(GLAccountJsonInputParams.PARENT_ID.getValue())).thenReturn(null);
++        when(command.longValueOfParameterNamed(GLAccountJsonInputParams.TAGID.getValue())).thenReturn(null);
++        when(command.longValueOfParameterNamed(GLAccountJsonInputParams.TYPE.getValue())).thenReturn(1L);
++        when(command.stringValueOfParameterNamed(GLAccountJsonInputParams.EXTERNAL_ID.getValue())).thenReturn("GL-1200");
++        when(command.stringValueOfParameterNamed(GLAccountJsonInputParams.CURRENCY_CODE.getValue())).thenReturn("RWF");
++        when(command.stringValueOfParameterNamed(GLAccountJsonInputParams.GL_CODE.getValue())).thenReturn("1200");
++        when(command.stringValueOfParameterNamed(GLAccountJsonInputParams.NAME.getValue())).thenReturn(name);
++        GLAccountCommand accountCommand = new GLAccountCommand(null, name, null, "1200", false, true, 1, 1, name, null, "GL-1200", "RWF");
++        when(fromApiJsonDeserializer.commandFromApiJson("{}")).thenReturn(accountCommand);
++        return command;
++    }
+ }
+diff --git a/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountJsonInputParams.java b/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountJsonInputParams.java
+index 18e06a1..4dcfa99 100644
+--- a/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountJsonInputParams.java
++++ b/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/api/GLAccountJsonInputParams.java
+@@ -35,7 +35,9 @@ public enum GLAccountJsonInputParams {
+     TYPE("type"), //
+     USAGE("usage"), //
+     DESCRIPTION("description"), //
+-    TAGID("tagId"); //
++    TAGID("tagId"), //
++    EXTERNAL_ID("externalId"), //
++    CURRENCY_CODE("currencyCode"); //
+ 
+     private final String value;
+ 
+diff --git a/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/data/GLAccountData.java b/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/data/GLAccountData.java
+index 7996064..975c5af 100644
+--- a/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/data/GLAccountData.java
++++ b/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/data/GLAccountData.java
+@@ -50,6 +50,8 @@ public class GLAccountData implements Serializable {
+     private EnumOptionData type;
+     private EnumOptionData usage;
+     private String description;
++    private String externalId;
++    private String currencyCode;
+     private String nameDecorated;
+     private CodeValueData tagId;
+     private Long organizationRunningBalance;
+diff --git a/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccount.java b/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccount.java
+index 0107fe2..24b843d 100644
+--- a/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccount.java
++++ b/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccount.java
+@@ -40,7 +40,8 @@ import org.apache.fineract.infrastructure.core.api.JsonCommand;
+ import org.apache.fineract.infrastructure.core.domain.AbstractPersistableCustom;
+ 
+ @Entity
+-@Table(name = "acc_gl_account", uniqueConstraints = { @UniqueConstraint(columnNames = { "gl_code" }, name = "acc_gl_code") })
++@Table(name = "acc_gl_account", uniqueConstraints = { @UniqueConstraint(columnNames = { "gl_code" }, name = "acc_gl_code"),
++        @UniqueConstraint(columnNames = { "external_id" }, name = "acc_gl_external_id") })
+ @Getter
+ @Setter
+ @NoArgsConstructor
+@@ -79,6 +80,12 @@ public class GLAccount extends AbstractPersistableCustom<Long> {
+     @Column(name = "description", nullable = true, length = 500)
+     private String description;
+ 
++    @Column(name = "external_id", length = 100)
++    private String externalId;
++
++    @Column(name = "currency_code", length = 3)
++    private String currencyCode;
++
+     @ManyToOne(fetch = FetchType.LAZY)
+     @JoinColumn(name = "tag_id")
+     private CodeValue tagId;
+diff --git a/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccountRepository.java b/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccountRepository.java
+index 59dd985..16509f1 100644
+--- a/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccountRepository.java
++++ b/fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccountRepository.java
+@@ -27,4 +27,6 @@ public interface GLAccountRepository extends JpaRepository<GLAccount, Long>, Jpa
+     // no added behaviour
+     // adding behaviour to fetch id by glcode for opening balance bulk import
+     Optional<GLAccount> findOneByGlCode(String glCode);
++
++    Optional<GLAccount> findOneByExternalId(String externalId);
+ }
+diff --git a/fineract-provider/src/main/resources/db/changelog/tenant/changelog-tenant.xml b/fineract-provider/src/main/resources/db/changelog/tenant/changelog-tenant.xml
+index c603611..a9f7035 100644
+--- a/fineract-provider/src/main/resources/db/changelog/tenant/changelog-tenant.xml
++++ b/fineract-provider/src/main/resources/db/changelog/tenant/changelog-tenant.xml
+@@ -259,4 +259,5 @@
+     <include file="parts/0238_transaction_summary_report_update_originator_inline_join.xml" relativeToChangelogFile="true" />
+     <include file="parts/0239_add_retained_earning_job.xml" relativeToChangelogFile="true"/>
+     <include file="parts/0240_add_retained_earning_global_configuration.xml" relativeToChangelogFile="true"/>
++    <include file="parts/0241_add_gl_account_external_reference.xml" relativeToChangelogFile="true"/>
+ </databaseChangeLog>
+diff --git a/fineract-provider/src/main/resources/db/changelog/tenant/parts/0241_add_gl_account_external_reference.xml b/fineract-provider/src/main/resources/db/changelog/tenant/parts/0241_add_gl_account_external_reference.xml
+new file mode 100644
+index 0000000..ffc4d6b
+--- /dev/null
++++ b/fineract-provider/src/main/resources/db/changelog/tenant/parts/0241_add_gl_account_external_reference.xml
+@@ -0,0 +1,32 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++
++    Licensed to the Apache Software Foundation (ASF) under one
++    or more contributor license agreements. See the NOTICE file
++    distributed with this work for additional information
++    regarding copyright ownership. The ASF licenses this file
++    to you under the Apache License, Version 2.0 (the
++    "License"); you may not use this file except in compliance
++    with the License. You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++    Unless required by applicable law or agreed to in writing,
++    software distributed under the License is distributed on an
++    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++    KIND, either express or implied. See the License for the
++    specific language governing permissions and limitations
++    under the License.
++
++-->
++<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
++                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.1.xsd">
++    <changeSet author="assessment" id="0241-add-gl-account-external-reference">
++        <addColumn tableName="acc_gl_account">
++            <column name="external_id" type="VARCHAR(100)"/>
++            <column name="currency_code" type="VARCHAR(3)"/>
++        </addColumn>
++        <addUniqueConstraint tableName="acc_gl_account" columnNames="external_id" constraintName="acc_gl_external_id"/>
++    </changeSet>
++</databaseChangeLog>
+diff --git a/integration-tests/src/test/java/org/apache/fineract/integrationtests/accounting/GLAccountExternalReferenceIntegrationTest.java b/integration-tests/src/test/java/org/apache/fineract/integrationtests/accounting/GLAccountExternalReferenceIntegrationTest.java
+new file mode 100644
+index 0000000..8fc9dfc
+--- /dev/null
++++ b/integration-tests/src/test/java/org/apache/fineract/integrationtests/accounting/GLAccountExternalReferenceIntegrationTest.java
+@@ -0,0 +1,69 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied. See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.fineract.integrationtests.accounting;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++
++import io.restassured.builder.ResponseSpecBuilder;
++import io.restassured.response.Response;
++import io.restassured.specification.RequestSpecification;
++import io.restassured.specification.ResponseSpecification;
++import org.apache.fineract.integrationtests.client.IntegrationTest;
++import org.apache.fineract.integrationtests.common.Utils;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++public class GLAccountExternalReferenceIntegrationTest extends IntegrationTest {
++
++    private static final String URL = "/fineract-provider/api/v1/glaccounts?" + Utils.TENANT_IDENTIFIER;
++
++    @BeforeEach
++    void setUp() {
++        Utils.initializeRESTAssured();
++    }
++
++    @Test
++    void identicalExternalReferenceReturnsTheSameAccountAndADifferentPayloadConflicts() {
++        RequestSpecification requestSpec = Utils.initializeDefaultRequestSpecification();
++        ResponseSpecification ok = new ResponseSpecBuilder().expectStatusCode(200).build();
++        String externalId = "GL-IT-" + System.currentTimeMillis();
++        String body = accountJson(externalId, "Loan Receivable", "1200" + externalId.substring(externalId.length() - 4));
++        Integer firstId = Utils.performServerPost(requestSpec, ok, URL, body, "resourceId");
++        Integer secondId = Utils.performServerPost(requestSpec, ok, URL, body, "resourceId");
++        assertEquals(firstId, secondId);
++
++        String changed = accountJson(externalId, "Other name", "1200" + externalId.substring(externalId.length() - 4));
++        Response conflict = io.restassured.RestAssured.given().spec(requestSpec).body(changed).when().post(URL).andReturn();
++        assertEquals(403, conflict.statusCode());
++        assertNotEquals(firstId, null);
++    }
++
++    @Test
++    void createWithoutAuthenticationIsRejected() {
++        Response response = io.restassured.RestAssured.given().contentType("application/json")
++                .body(accountJson("GL-NOAUTH", "Bank", "1100-noauth")).when().post(URL).andReturn();
++        assertEquals(401, response.statusCode());
++    }
++
++    private static String accountJson(final String externalId, final String name, final String glCode) {
++        return "{\"name\":\"" + name + "\",\"glCode\":\"" + glCode + "\",\"type\":1,\"usage\":1,\"manualEntriesAllowed\":true,"
++                + "\"externalId\":\"" + externalId + "\",\"currencyCode\":\"RWF\"}";
++    }
++}
